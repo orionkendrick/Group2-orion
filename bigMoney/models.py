@@ -36,6 +36,18 @@ class merchandise(models.Model):
 
     is_approved = models.BooleanField(default=None, null=True)
 
+    GENRE_CHOICES = (
+        ('clothing', 'Clothing'),
+        ('books', 'Books'),
+        ('movies', 'Movies'),
+        ('computers', 'Computers'),
+        ('food', 'Food'),
+        ('cooking', 'Cooking'),
+        ('outdoors', 'Outdoors'),
+    )
+
+    genre = models.CharField(max_length=255, choices=GENRE_CHOICES, null=True)
+
     def __str__(self):
         return f'{self.title} - {self.poster}'
 
@@ -51,7 +63,11 @@ class shoppingCart(models.Model):
 
 class Order(models.Model):
     date_ordered = models.DateTimeField(default=timezone.now)
-    Order = models.ForeignKey(shoppingCart, on_delete=models.SET_NULL, null=True)
+    customer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    items = models.ManyToManyField(CartItem)
+
+    def __str__(self):
+        return f'Order made by {self.customer.username}'
 
 class User(AbstractUser):
     USER_ROLES = (

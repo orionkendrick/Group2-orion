@@ -1,4 +1,5 @@
 from django.contrib.auth.forms import AuthenticationForm
+from django.views.decorators.cache import cache_control
 from django.contrib.auth import authenticate, login, logout
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required, user_passes_test
@@ -6,6 +7,8 @@ from django.contrib import messages
 from django.urls import reverse
 from .forms import *
 from .models import *
+from decimal import Decimal
+from django.utils.decorators import method_decorator
 
 # Create your views here.
 def home(request):
@@ -41,6 +44,8 @@ def loginview(request):
         form = AuthenticationForm()
     return render(request, 'login.html', {'form': form})
 
+# User can logout and click back to view pages, but pages are dummy pages when this is done
+@cache_control(no_cache=True, must_revalidate=True, no_store=True)
 @login_required
 def logout_view(request):
     logout(request)
@@ -123,10 +128,11 @@ def create_listing(request):
 
 def view_merchandise(request, item_id):
     item = get_object_or_404(merchandise, pk=item_id)
+    related_items = merchandise.objects.filter(genre=item.genre).exclude(pk=item_id)[:2]
 
     messages.get_messages(request) # retrieve any messages
 
-    return render(request, 'view_item.html', {'item': item})
+    return render(request, 'view_item.html', {'item': item, 'related_items': related_items})
 
 @login_required
 def view_my_merchandise(request):
@@ -153,17 +159,138 @@ def redeem_funds(request):
 
 @login_required
 def add_to_cart(request, item_id):
-    item = get_object_or_404(merchandise, pk=item_id)
-    cart = shoppingCart.objects.get_or_create(customer=request.user)
+    merch = get_object_or_404(merchandise, pk=item_id)
+    if (merch.quantity_in_stock < 1):
+        messages.error(request, "none available to purchase")
+        return redirect('view-product', item_id=item_id)
+    cart, created = shoppingCart.objects.get_or_create(customer=request.user)
+    cart_items = cart.items.all()
+    exists = False
+    for cart_item_i in cart_items:
+        if merch == cart_item_i.item:
+            exists = True
+            cart_item = cart_item_i
+    if not exists:
+        cart_item = CartItem.objects.create(item = merch)
 
-    cart_item, created = CartItem.objects.get_or_create(item=item, customer=request.user)
 
-    if not created:
+    if exists:
         cart_item.quantity += 1
-        cart_item.save()
     else:
         cart_item.quantity = 1
-        cart.items.add(cart_item)
-    
-    messages.success(request, f"a {item.title} has been added to your cart!")
+
+    cart_item.save()
+    cart.items.add(cart_item)
+
+    messages.success(request, f'a {merch.title} has been added to your cart!')
     return redirect('view-product', item_id=item_id)
+
+@login_required
+def view_cart(request):
+    user = request.user
+    cart = shoppingCart.objects.get_or_create(customer=request.user)
+    if cart[0].items != None:
+        items = cart[0].items.all()
+    else:
+        items = None
+    total_cost = 0
+
+    for cart_item in items:
+        total_cost += cart_item.item.cost * cart_item.quantity
+
+    context = {'items': items, 'total_cost': total_cost}
+    return render(request, "view_cart.html", context)
+
+@login_required
+def checkout(request):
+    if request.method == 'POST':
+        cart = shoppingCart.objects.get(customer=request.user)
+        #total_cost = Decimal(str('0.0'))
+        total_cost = 0
+
+        if cart.items.count() == 0:
+            messages.error(request, 'Please add an item to the cart')
+            return redirect('view-cart')
+
+        # Calculate total cost of items in the cart
+        for cart_item in cart.items.all():
+            total_cost += cart_item.item.cost * cart_item.quantity
+
+        # Check if the user has enough balance to pay for the items
+        if request.user.card_number == None:
+            messages.error(request, 'Please add a card before making a purchase')
+            return redirect('view-cart')
+
+        print("TYPE", type(request.user.balance))
+
+        # Update user's balance
+        # unsupported operand type(s) for -=: 'float' and 'decimal.Decimal'
+        #request.user.balance -= total_cost
+        #request.user.save()
+
+        # Update item quantity_in_stock and quantity_sold
+        for cart_item in cart.items.all():
+            item = cart_item.item
+            item.quantity_in_stock -= cart_item.quantity
+            item.quantity_sold += cart_item.quantity
+            cart_item.item.poster.balance += float(cart_item.item.cost * cart_item.quantity)
+            item.save()
+            cart_item.item.poster.save()
+
+        # Create the order
+        order = Order.objects.create(customer=request.user)
+        for item in cart.items.all():
+            order.items.add(item)
+        order.customer = request.user
+        request.user.Orders.add(order)
+        order.save()
+        messages.success(request, 'Order successfully placed!')
+
+        # Clear the shopping cart
+        cart.items.clear()
+
+        # Redirect to a success page or the home page
+        return redirect('view-cart')
+
+def search(request):
+    query = request.GET.get('query')
+    results = merchandise.objects.filter(title__icontains=query)
+    context = {
+        'query': query,
+        'results': results,
+    }
+    return render(request, 'search_results.html', context)
+
+@login_required
+def view_orders(request):
+    messages.get_messages(request) # retrieve any messages
+    user = request.user
+    orders = user.Orders.all()
+    context = {"orders": orders}
+    return render(request, "view_orders.html", context)
+
+@login_required
+def view_order(request, order_id):
+    order = get_object_or_404(Order, pk=order_id)
+
+    # calculate the total cost of the order
+    total_cost = 0
+    for item in order.items.all():
+            total_cost += item.item.cost * item.quantity
+
+    context = {"order": order, "cost": total_cost}
+
+    return render(request, 'view_order.html', context)
+
+@login_required
+def return_order(request, order_id):
+    order = get_object_or_404(Order, pk=order_id)
+
+    for cartItem in order.items.all():
+        cartItem.item.poster.balance -= float(cartItem.item.cost * cartItem.quantity)
+        cartItem.item.poster.save()
+
+    order.delete()
+
+    messages.success(request, "Successfully Returned Order!")
+    return redirect('view-orders')
